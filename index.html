@@ -183,6 +183,7 @@ const F={a:'grayscale(1) contrast(1.6)',b:'grayscale(1) brightness(.75) contrast
 // [x début, x fin, y début, échelle, filtre] : coins du bas (le numéro est en bas à gauche ou à droite), puis anti-reflet, puis bande complète
 const ROUNDS=[
   [[0,.55,.86,2,'a'],[.45,1,.86,2,'a']],
+  [[0,.55,.84,2.5,'i'],[.45,1,.84,2.5,'i']],
   [[0,.55,.84,2.5,'b'],[.45,1,.84,2.5,'b']],
   [[0,1,.8,3,'a'],[0,1,.8,3,'i']]
 ];
@@ -210,12 +211,12 @@ async function scan(canvas){
     status('Lecture du numéro…');
     const sch=await getPool();
     let info={},all='';
-    for(const round of ROUNDS){
+    for(let r=0;r<ROUNDS.length;r++){const round=ROUNDS[r];
       const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f]))))).map(r=>r.data.text);
       all+='\n'+txt.join('\n');
       const ps=txt.map(parse),best=ps.find(p=>p.number&&p.total)||ps.find(p=>p.number);
       if(best&&(!info.number||(best.total&&!info.total)))info=best;
-      if(info.number&&info.total)break;
+      if(info.number&&info.total&&(parse(all).code||r>=1))break;
     }
     const pc=parse(all);info.code??=pc.code;info.lang??=pc.lang;
     if(!info.number){status('Numéro illisible. Rapproche la carte, incline-la pour éviter les reflets, ou saisis le numéro ci-dessous.');return}
@@ -288,13 +289,17 @@ async function search({number,total,code,name,setId,setName}){
     return j.data||[];
   };
   // extension : choisie à la main, sinon le code imprimé sur la carte (ex. CRI)
-  const ext=setId?`set.id:${setId}`:setName?`set.name:"${setName.replace(/"/g,'')}*"`:code?`set.ptcgoCode:${code}`:null;
-  let d=ext?await get([ext,...base]):[];
-  if(!d.length&&!setId&&!setName){ // code inconnu de la base de prix : on retombe sur numéro + total imprimé
+  const fix=c=>c.replace(/0/g,'O').replace(/1/g,'I').replace(/5/g,'S').replace(/8/g,'B');
+  const codes=code?[...new Set([code,fix(code)])]:[];
+  let d=[],matched=null;
+  if(setId||setName){d=await get([setId?`set.id:${setId}`:`set.name:"${setName.replace(/"/g,'')}*"`,...base]);matched='manual'}
+  else for(const c of codes){d=await get([`set.ptcgoCode:${c}`,...base]);if(d.length){matched='code';break}}
+  if(!d.length&&!setId&&!setName){ // code absent ou inconnu de la base de prix : numéro + total imprimé
     const q=[...base];if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
-    d=await get(q);
+    d=await get(q);matched='total';
   }
   if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return false}
+  window._read=canvas?{code,raw:`${number}/${total||'?'}`,matched}:null; // ce qui a été lu sur la carte
   status('');show(d[0],d);return true;
 }
 $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{0,3}\d{1,3})\s*\/?\s*(\d{1,3})?/);
@@ -335,6 +340,7 @@ function render(all=window._all){
   <div class="meta">N° ${esc(c.number)}/${esc(c.set.printedTotal)} · ${esc(c.rarity||'Rareté inconnue')}</div>
   <span class="badge">Langue : ${lang?LANGS[lang]:'non détectée'}</span>
   <span class="badge ${isFoil?'foil':''}">${foil?'Foil (holo de base)':finish==='reverse'?'Foil (reverse holo)':'Non foil'}</span>
+  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${window._read.matched==='total'?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
   ${hasRev?`<div class="chips" role="group" aria-label="Finition"><button aria-pressed="${finish==='normal'}" data-f="normal">Normale</button><button aria-pressed="${finish==='reverse'}" data-f="reverse">Reverse holo</button></div>`:''}
   </div>
   <div class="price">${v?`<div class="big">${eur(v.t)}</div><div class="sub"><span>Dès ${eur(v.l)}</span><span>Moy. 30 j ${eur(v.a)}</span><span>Moy. vente ${eur(v.s)}</span></div>
