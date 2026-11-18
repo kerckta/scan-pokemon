@@ -74,7 +74,7 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const eur=n=>n==null?'—':new Intl.NumberFormat('fr-BE',{style:'currency',currency:'EUR'}).format(n);
 const LANGS={FR:'Français',EN:'Anglais',DE:'Allemand',ES:'Espagnol',IT:'Italien',PT:'Portugais'};
-const KW={FR:['faiblesse','retraite','talent','dresseur'],EN:['weakness','retreat','ability','illus'],DE:['schwache','ruckzug','fahigkeit','resistenz'],ES:['debilidad','retirada','habilidad','entrenador'],IT:['debolezza','ritirata','abilita','allenatore'],PT:['fraqueza','recuo','habilidade','treinador']};
+const KW={FR:['faiblesse','retraite','talent','dresseur'],EN:['weakness','retreat','ability'],DE:['schwache','ruckzug','fahigkeit','resistenz'],ES:['debilidad','retirada','habilidad','entrenador'],IT:['debolezza','ritirata','abilita','allenatore'],PT:['fraqueza','recuo','habilidade','treinador']};
 const norm=t=>t.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 let worker,cur=null,finish='normal',lang=null;
 const status=t=>$('#st').textContent=t;
@@ -206,24 +206,26 @@ function crop(c,x0,x1,y0,scale,filter){
   const g=s.getContext('2d');g.filter=filter;g.drawImage(c,x,y,w,h,0,0,s.width,s.height);return s;
 }
 async function scan(canvas){
-  if(busy)return;busy=true;let ok=false;const id=++scanId;
+  if(busy)return;busy=true;let ok=false;const id=++scanId;let info={},all='';
   try{
     status('Lecture du numéro…');
     const sch=await getPool();
-    let info={},all='';
+    const codes=[];
     for(let r=0;r<ROUNDS.length;r++){const round=ROUNDS[r];
-      const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f]))))).map(r=>r.data.text);
-      all+='\n'+txt.join('\n');
+      const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f]))))).map(x=>x.data.text);
+      all+=' '+txt.join(' ').replace(/\s+/g,' ');
       const ps=txt.map(parse),best=ps.find(p=>p.number&&p.total)||ps.find(p=>p.number);
       if(best&&(!info.number||(best.total&&!info.total)))info=best;
-      if(info.number&&info.total&&(parse(all).code||r>=1))break;
+      for(const p of ps)if(p.number)for(const c of p.codes)if(!codes.includes(c))codes.push(c);
+      if(info.number&&info.total&&(codes.length||r>=1))break;
     }
-    const pc=parse(all);info.code??=pc.code;info.lang??=pc.lang;
-    if(!info.number){status('Numéro illisible. Rapproche la carte, incline-la pour éviter les reflets, ou saisis le numéro ci-dessous.');return}
+    const pc=parse(all);info.lang??=pc.lang;
+    if(!info.number){status('Numéro illisible. Rapproche la carte, incline-la pour éviter les reflets, ou saisis le numéro ci-dessous. (texte lu : « '+all.trim().slice(0,90)+' »)');return}
     lang=info.lang||null;
-    ok=await search({...info,canvas});if(ok)shownScan=id;
+    status('Lu : n° '+info.number+'/'+(info.total||'?')+(codes[0]?' · extension '+codes[0]:'')+' — recherche du prix…');
+    ok=await search({...info,codes,canvas});if(ok)shownScan=id;
     if(ok&&!lang)detectLang(canvas,id); // en arrière-plan : ne retarde pas le prix
-  }catch(e){status('Erreur : '+e.message)}
+  }catch(e){status('Lu : n° '+(info.number||'?')+'/'+(info.total||'?')+' — '+e.message)}
   finally{busy=false;if(ok){fails=0;failAt=0}else{fails++;failAt=Date.now()}}
 }
 async function detectLang(canvas,id){
@@ -237,27 +239,41 @@ async function detectLang(canvas,id){
   }catch(e){}
 }
 function parse(t){
-  const m=t.match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/);
-  // « CRI FR 095/086 » : extension (3 lettres) + langue (2 lettres) juste avant le numéro, même avec le cadre autour
-  const cb=t.match(/\b([A-Z0-9]{2,4})[\s|\[\]]{0,3}(EN|FR|DE|ES|IT|PT)[\s|\[\]•.*]{0,5}[A-Z]{0,3}\d{1,3}\s*\/\s*[A-Z]{0,3}\d{1,3}/);
-  const cl=cb||t.match(/\b([A-Z0-9]{2,4})[\s|\[\]]{1,3}(EN|FR|DE|ES|IT|PT)\b/);
+  const T=t.toUpperCase();
+  // 1) numéro bien lu : 095/086, 45/198, TG12/TG30
+  let m=T.match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/),number=null,total=null,at=-1;
+  if(m){number=m[1];total=m[2];at=m.index}
+  else{ // 2) barre mal lue (souvent 7, 1, I ou |) ou absente : 0957086 -> 095/086
+    const k=T.match(/(0\d{2})[\/71I|L ]?(0\d{2})/)||T.match(/(?<!\d)(\d{3})[\/71I|L ]?(\d{3})\d{0,2}(?!\d)/); // d'abord le format SV (095/086), sinon 3+3 chiffres
+    if(k&&+k[2]>=10){number=k[1];total=k[2];at=k.index}
+  }
+  // langue + code d'extension : « CRI FR 095/086 », cadre et espaces tolérés
+  const cb=T.match(/\b([A-Z0-9]{2,4})[\s|\[\]]{0,3}(EN|FR|DE|ES|IT|PT)[\s|\[\]•.*]{0,5}[A-Z]{0,3}\d{1,3}\s*\/\s*[A-Z]{0,3}\d{1,3}/);
+  const cl=cb||T.match(/\b([A-Z0-9]{2,4})[\s|\[\]]{1,3}(EN|FR|DE|ES|IT|PT)\b/);
   let l=cl?cl[2]:null;
   if(!l){const n=norm(t);let best=0;for(const k in KW){const sc=KW[k].filter(w=>n.includes(w)).length;if(sc>best){best=sc;l=k}}}
-  return{number:m&&m[1].replace(/^([A-Z]*)0+(?=\d)/,'$1'),total:m&&m[2].replace(/^0+(?=\d)/,''),code:cl&&cl[1],lang:l};
+  // codes possibles : celui trouvé avec la langue, sinon les mots de 3 caractères juste avant le numéro
+  const codes=[];
+  if(cl)codes.push(cl[1]);
+  if(at>0){
+    const before=T.slice(Math.max(0,at-26),at).match(/\b[A-Z0-9]{3}\b/g)||[];
+    for(const w of before.reverse())if(/[A-Z]/.test(w)&&!/^(EN|FR|DE|ES|IT|PT)$/.test(w)&&!codes.includes(w))codes.push(w);
+  }
+  return{number:number&&number.replace(/^([A-Z]*)0+(?=\d)/,'$1'),total:total&&total.replace(/^0+(?=\d)/,''),code:codes[0]||null,codes:codes.slice(0,3),lang:l};
 }
 
 // Recherche pokemontcg.io
-async function api(url,n=3){
+async function api(url,n=2){
   for(let i=0;i<n;i++){
     try{
-      const c=new AbortController(),t=setTimeout(()=>c.abort(),20000);
+      const c=new AbortController(),t=setTimeout(()=>c.abort(),10000);
       const r=await fetch(url,{signal:c.signal});clearTimeout(t);
       if(r.ok){const j=await r.json().catch(()=>null);if(j)return j}
     }catch(e){}
-    status('Le serveur de prix est lent, nouvel essai ('+(i+1)+'/3)…');
+    status('Le serveur de prix est lent, nouvel essai ('+(i+1)+'/'+n+')…');
     await new Promise(r=>setTimeout(r,1500));
   }
-  throw new Error('le serveur de prix (pokemontcg.io) ne répond pas, réessaie dans un moment.');
+  throw new Error('le serveur de prix (pokemontcg.io) ne répond pas pour le moment : le numéro est bien lu, réessaie dans quelques minutes ou saisis la carte à la main.');
 }
 const apiCache=new Map();
 // Liste des extensions (chargée quand on touche le champ « Extension »)
@@ -277,7 +293,7 @@ function findSet(txt){
   const s=SETS.find(x=>[x.name,x.ptcgoCode,x.id].some(k=>k&&k.toLowerCase()===v));
   return s?{setId:s.id}:{setName:txt.trim()};
 }
-async function search({number,total,code,name,setId,setName}){
+async function search({number,total,code,codes:cands,name,setId,setName,canvas}){
   if(!number&&!name){status('Saisis au moins un nom ou un numéro (avec l’extension si tu veux).');return false}
   status('Recherche du prix…');
   const base=[];
@@ -290,16 +306,16 @@ async function search({number,total,code,name,setId,setName}){
   };
   // extension : choisie à la main, sinon le code imprimé sur la carte (ex. CRI)
   const fix=c=>c.replace(/0/g,'O').replace(/1/g,'I').replace(/5/g,'S').replace(/8/g,'B');
-  const codes=code?[...new Set([code,fix(code)])]:[];
-  let d=[],matched=null;
+  const codes=[...new Set([...(cands||[]),code].filter(Boolean).flatMap(c=>[c,fix(c)]))].slice(0,4);
+  let d=[],matched=null,used=null;
   if(setId||setName){d=await get([setId?`set.id:${setId}`:`set.name:"${setName.replace(/"/g,'')}*"`,...base]);matched='manual'}
-  else for(const c of codes){d=await get([`set.ptcgoCode:${c}`,...base]);if(d.length){matched='code';break}}
+  else for(const c of codes){d=await get([`set.ptcgoCode:${c}`,...base]);if(d.length){matched='code';used=c;break}}
   if(!d.length&&!setId&&!setName){ // code absent ou inconnu de la base de prix : numéro + total imprimé
     const q=[...base];if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
     d=await get(q);matched='total';
   }
   if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return false}
-  window._read=canvas?{code,raw:`${number}/${total||'?'}`,matched}:null; // ce qui a été lu sur la carte
+  window._read=canvas?{code:matched==='code'?used:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched}:null; // ce qui a été lu sur la carte
   status('');show(d[0],d);return true;
 }
 $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{0,3}\d{1,3})\s*\/?\s*(\d{1,3})?/);
