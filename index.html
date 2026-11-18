@@ -82,18 +82,20 @@ const status=t=>$('#st').textContent=t;
 // Lampe torche (affichée seulement si le téléphone/navigateur la permet)
 let track=null;
 function initTorch(){
-  if(!track||!(track.getCapabilities?.()||{}).torch)return;
-  const b=$('#tl');b.hidden=false;
+  if(!track)return;
+  const b=$('#tl');b.hidden=false; // toujours affiché : certains téléphones ne déclarent la lampe qu'après essai
   b.onclick=async()=>{
     const on=b.getAttribute('aria-pressed')!=='true';
     try{
       await track.applyConstraints({advanced:[{torch:on}]});
+      const st=(track.getSettings?.()||{}).torch,caps=track.getCapabilities?.()||{};
+      if((st!==undefined&&st!==on)||(!caps.torch&&st===undefined))throw new Error('torch');
       b.setAttribute('aria-pressed',on);b.textContent=on?'Lampe allumée':'Lampe';
-    }catch(e){status('La lampe ne peut pas être allumée sur ce navigateur.')}
+    }catch(e){status('Ce téléphone ou ce navigateur ne permet pas d’allumer la lampe depuis une page web. Essaie avec Chrome (pas le navigateur intégré d’une autre appli) ou éclaire la carte avec une lampe externe.')}
   };
 }
 // Caméra
-navigator.mediaDevices?.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}}).then(s=>{track=s.getVideoTracks()[0];$('#v').addEventListener('playing',initTorch,{once:true});$('#v').srcObject=s;$('#v').play()}).catch(()=>status('Caméra indisponible : utilise « Importer une photo ».'));
+navigator.mediaDevices?.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}}).then(s=>{track=s.getVideoTracks()[0];$('#v').addEventListener('playing',initTorch,{once:true});initTorch();$('#v').srcObject=s;$('#v').play()}).catch(()=>status('Caméra indisponible : utilise « Importer une photo ».'));
 
 function cropRect(){
   const v=$('#v'),vw=v.videoWidth,vh=v.videoHeight;if(!vw)return null;
