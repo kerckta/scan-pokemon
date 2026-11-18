@@ -66,7 +66,7 @@ small{color:var(--mut)}
   <button>Chercher</button>
 </form>
 <div id="out"></div>
-<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 02h10</small></p>
+<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 02h40</small></p>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
@@ -260,10 +260,14 @@ function parse(t){
   const T=t.toUpperCase();
   // 1) numéro bien lu : 095/086, 45/198, TG12/TG30
   let m=T.match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/),number=null,total=null,at=-1;
-  if(m){number=m[1];total=m[2];at=m.index}
-  else{ // 2) barre mal lue (souvent 7, 1, I ou |) ou absente : 0957086 -> 095/086
+  const bad=x=>x&&/^\d+$/.test(x[1])&&/^\d+$/.test(x[2])&&(+x[2]>400||+x[2]<5||+x[1]>+x[2]+120||+x[1]===0);
+  if(m&&bad(m))m=T.slice(m.index+m[0].length).match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/);
+  const pad=T.match(/(?<!\d)(0\d{2})\s*[\/71I|L ]\s*(0\d{2})(?!\d)/); // format moderne 095/086 : prioritaire sur une lecture courte douteuse (50/54)
+  if(pad&&+pad[2]>=10&&+pad[2]<=400&&+pad[1]<=+pad[2]+120&&!(m&&/^\d{3}$/.test(m[1])&&/^\d{3}$/.test(m[2])&&!bad(m)))m=pad;
+  if(m&&!bad(m)){number=m[1];total=m[2];at=m.index}
+  else{m=null; // 2) barre mal lue (souvent 7, 1, I ou |) ou absente : 0957086 -> 095/086
     const k=T.match(/(0\d{2})[\/71I|L ]{0,2}(0\d{2})/)||T.match(/(?<!\d)(\d{3})[\/71I|L ]?(\d{3})\d{0,2}(?!\d)/); // d'abord le format SV (095/086), sinon 3+3 chiffres
-    if(k&&+k[2]>=10){number=k[1];total=k[2];at=k.index}
+    if(k&&+k[2]>=10&&+k[2]<=400&&+k[1]<=+k[2]+120){number=k[1];total=k[2];at=k.index}
   }
   // langue + code d'extension : « CRI FR 095/086 », cadre et espaces tolérés
   const cb=T.match(/\b([A-Z0-9]{2,4})[\s|\[\]]{0,3}(EN|FR|DE|ES|IT|PT)[\s|\[\]•.*]{0,5}[A-Z]{0,3}\d{1,3}\s*\/\s*[A-Z]{0,3}\d{1,3}/);
@@ -333,7 +337,49 @@ function findSet(txt){
   const s=SETS.find(x=>[x.name,x.ptcgoCode,x.id].some(k=>k&&k.toLowerCase()===v));
   return s?{setId:s.id}:{setName:txt.trim()};
 }
+function applyPricing(c,pr){
+  const m=pr?.cardmarket;
+  if(m&&[m.trend,m.avg30,m.low,m.avg].some(x=>x>0))c.cardmarket={url:'',updatedAt:(m.updated||'').slice(0,10),prices:{trendPrice:m.trend,lowPrice:m.low,avg30:m.avg30,averageSellPrice:m.avg,reverseHoloTrend:m['trend-holo'],reverseHoloLow:m['low-holo'],reverseHoloAvg30:m['avg30-holo'],reverseHoloSell:m['avg-holo']}};
+  const tp=pr?.tcgplayer;
+  if(tp&&!c.tcgplayer?.prices){const prices={};
+    for(const [k,v] of Object.entries(tp))if(v&&typeof v==='object'&&(v.marketPrice||v.midPrice))prices[k.replace(/-(\w)/g,(_,x)=>x.toUpperCase())]={market:v.marketPrice,low:v.lowPrice,mid:v.midPrice};
+    if(Object.keys(prices).length)c.tcgplayer={prices}}
+}
+// Secours : TCGdex (en français) retrouve l'extension par son total imprimé + son nom, puis la carte par son numéro
+async function tcgdexSearch({number,total,codes}){
+  const enc=encodeURIComponent,n=String(number).replace(/\D/g,'');if(!n)return[];
+  let sets=[];try{sets=await api('https://api.tcgdex.net/v2/fr/sets',2,true)}catch(e){return[]}
+  const lc=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const score=st=>{let sc=0;if(total&&st.cardCount?.official==total)sc+=4;
+    for(const c0 of codes||[]){const c=lc(c0);let i=0;for(const ch of lc(st.name))if(ch===c[i])i++;if(c.length>1&&i>=c.length){sc+=3;break}}
+    if(codes?.some(c=>lc(st.id)===lc(c)))sc+=5;return sc};
+  const cand=sets.map(st=>({st,sc:score(st)})).filter(x=>x.sc>=(total?4:3)).sort((a,b)=>b.sc-a.sc).slice(0,4);
+  const out=[];
+  for(const {st} of cand){
+    for(const lid of [n.padStart(3,'0'),n]){
+      const d=await api('https://api.tcgdex.net/v2/fr/cards/'+enc(st.id+'-'+lid),1,true).catch(()=>null);
+      if(d&&d.name){
+        const c={id:d.id,name:d.name,number:String(parseInt(d.localId,10)||d.localId),rarity:d.rarity,
+          set:{name:d.set?.name||st.name,series:'',printedTotal:d.set?.cardCount?.official||st.cardCount?.official,releaseDate:''},
+          images:{small:d.image?d.image+'/low.webp':''}};
+        applyPricing(c,d.pricing);out.push(c);break;
+      }
+    }
+  }
+  return out;
+}
 async function search({number,total,code,codes:cands,name,setId,setName,canvas,numW}){
+  try{return await search0({number,total,code,codes:cands,name,setId,setName,canvas,numW})}
+  catch(e){
+    if(!number)throw e;
+    status('Serveur principal indisponible, essai avec une autre source…');
+    const d=await tcgdexSearch({number,total,codes:[...(cands||[]),code].filter(Boolean)});
+    if(!d.length)throw e;
+    window._read=canvas?{code:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched:'total',weak:numW!=null&&numW<3}:null;
+    status('');show(d[0],d);return true;
+  }
+}
+async function search0({number,total,code,codes:cands,name,setId,setName,canvas,numW}){
   if(!number&&!name){status('Saisis au moins un nom ou un numéro (avec l’extension si tu veux).');return false}
   status('Recherche du prix…');
   const base=[];
