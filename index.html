@@ -66,7 +66,7 @@ small{color:var(--mut)}
   <button>Chercher</button>
 </form>
 <div id="out"></div>
-<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 00h30</small></p>
+<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 00h50</small></p>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
@@ -265,31 +265,53 @@ function parse(t){
 }
 
 // Recherche pokemontcg.io
-async function api(url,n=2){
+async function api(url,n=2,quiet=false){
   for(let i=0;i<n;i++){
     try{
       const c=new AbortController(),t=setTimeout(()=>c.abort(),10000);
       const r=await fetch(url,{signal:c.signal});clearTimeout(t);
       if(r.ok){const j=await r.json().catch(()=>null);if(j)return j}
     }catch(e){}
-    status('Le serveur de prix est lent, nouvel essai ('+(i+1)+'/'+n+')…');
+    if(!quiet)status('Le serveur de prix est lent, nouvel essai ('+(i+1)+'/'+n+')…');
     await new Promise(r=>setTimeout(r,1500));
   }
   throw new Error('le serveur de prix (pokemontcg.io) ne répond pas pour le moment : le numéro est bien lu, réessaie dans quelques minutes ou saisis la carte à la main.');
 }
 const apiCache=new Map();
-// Liste des extensions (chargée quand on touche le champ « Extension »)
-let SETS=[];
-async function loadSets(){
-  if(SETS.length)return;
-  try{
-    const j=await api('https://api.pokemontcg.io/v2/sets?select=id,name,series,ptcgoCode,releaseDate&orderBy=-releaseDate',1);
-    SETS=j.data||[];
-    $('#sets').innerHTML=SETS.map(s=>`<option value="${esc(s.name)}">${esc(s.series)}${s.ptcgoCode?' · '+esc(s.ptcgoCode):''}</option>`).join('');
-    status('');
-  }catch(e){status('')}
+// Liste des extensions, gardée 7 jours sur le téléphone ; chargée dès l'ouverture
+let SETS=[],setsP=null;
+try{SETS=JSON.parse(localStorage.getItem('sets_v1')||'[]')}catch(e){}
+function fillSets(){$('#sets').innerHTML=SETS.map(s=>`<option value="${esc(s.name)}">${esc(s.series)}${s.ptcgoCode?' · '+esc(s.ptcgoCode):''}</option>`).join('')}
+function loadSets(){
+  let t=0;try{t=+localStorage.getItem('sets_t')||0}catch(e){}
+  if(SETS.length&&Date.now()-t<6048e5){fillSets();return Promise.resolve()}
+  return setsP??=(async()=>{
+    try{
+      const j=await api('https://api.pokemontcg.io/v2/sets?select=id,name,series,ptcgoCode,printedTotal,releaseDate&orderBy=-releaseDate',2,true);
+      if(j.data?.length){SETS=j.data;try{localStorage.setItem('sets_v1',JSON.stringify(SETS));localStorage.setItem('sets_t',String(Date.now()))}catch(e){}}
+    }catch(e){}
+    fillSets();setsP=null;
+  })();
 }
+loadSets();
 $('#ms').addEventListener('focus',loadSets);
+// Code imprimé (ex. CRI) -> extension, même si la base de prix ne connaît pas ce code :
+// les lettres du code doivent apparaître dans l'ordre dans le nom (CRI -> « Chaos Rising »), le total imprimé et la 1re lettre départagent.
+function bestSetByCode(codes,total){
+  let best=null;
+  codes.forEach((code,ci)=>{
+    const c=String(code).toLowerCase().replace(/[^a-z0-9]/g,'');if(c.length<2)return;
+    for(const st of SETS){
+      const words=st.name.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(Boolean),letters=words.join('');
+      let i=0;for(const ch of letters)if(ch===c[i])i++;
+      if(i<c.length)continue;
+      let sc=1-ci+(letters[0]===c[0]?3:0)+(total&&+st.printedTotal===+total?4:0);
+      const ini=words.map(w=>w[0]).join('');for(const ch of c)if(ini.includes(ch))sc++;
+      if(!best||sc>best.sc||(sc===best.sc&&(st.releaseDate||'')>(best.st.releaseDate||'')))best={st,sc};
+    }
+  });
+  return best&&best.sc>=5?best.st:null;
+}
 function findSet(txt){
   const v=txt.trim().toLowerCase();if(!v)return{};
   const s=SETS.find(x=>[x.name,x.ptcgoCode,x.id].some(k=>k&&k.toLowerCase()===v));
@@ -302,7 +324,7 @@ async function search({number,total,code,codes:cands,name,setId,setName,canvas})
   if(number)base.push(`number:"${number}"`);
   if(name)base.push(`name:"${name}*"`);
   const get=async parts=>{
-    const url='https://api.pokemontcg.io/v2/cards?pageSize=12&select=id,name,number,rarity,set,images,cardmarket&q='+encodeURIComponent(parts.join(' '));
+    const url='https://api.pokemontcg.io/v2/cards?pageSize=12&select=id,name,number,rarity,set,images,cardmarket,tcgplayer&q='+encodeURIComponent(parts.join(' '));
     let j=apiCache.get(url);if(!j){j=await api(url);apiCache.set(url,j)} // une carte déjà vue s'affiche instantanément
     return j.data||[];
   };
@@ -312,13 +334,18 @@ async function search({number,total,code,codes:cands,name,setId,setName,canvas})
   let d=[],matched=null,used=null;
   if(setId||setName){d=await get([setId?`set.id:${setId}`:`set.name:"${setName.replace(/"/g,'')}*"`,...base]);matched='manual'}
   else for(const c of codes){d=await get([`set.ptcgoCode:${c}`,...base]);if(d.length){matched='code';used=c;break}}
-  if(!d.length&&!setId&&!setName){ // code absent ou inconnu de la base de prix : numéro + total imprimé
+  if(!d.length&&!setId&&!setName&&(cands&&cands.length||code)){ // code inconnu de la base de prix : extension retrouvée d'après son nom
+    if(!SETS.length)await loadSets();
+    const cs=bestSetByCode(cands&&cands.length?cands:[code],total);
+    if(cs){d=await get([`set.id:${cs.id}`,...base]);if(d.length){matched='codename';used=cs.name}}
+  }
+  if(!d.length&&!setId&&!setName){ // code absent ou introuvable : numéro + total imprimé
     const q=[...base];if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
     d=await get(q);matched='total';
     if(!d.length&&number){d=await get(base);matched='number'} // total mal lu : on propose toutes les cartes de ce numéro
   }
   if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return false}
-  window._read=canvas?{code:matched==='code'?used:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched}:null; // ce qui a été lu sur la carte
+  window._read=canvas?{code:matched==='code'?used:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched,via:matched==='codename'?used:null}:null; // ce qui a été lu sur la carte
   status('');show(d[0],d);return true;
 }
 $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{0,3}\d{1,3})\s*\/?\s*(\d{1,3})?/);
@@ -329,14 +356,20 @@ const intrinsicFoil=c=>!['Common','Uncommon','Rare','Promo',undefined].includes(
 const csearch=c=>'https://www.cardmarket.com/fr/Pokemon/Products/Search?searchString='+encodeURIComponent(c.name+' '+c.number);
 async function enrich(c){
   try{
-    const list=await api('https://api.tcgdex.net/v2/en/cards?name='+encodeURIComponent(c.name)+'&localId='+encodeURIComponent(c.number),1);
-    for(const b of list.slice(0,8)){
-      const d=await api('https://api.tcgdex.net/v2/en/cards/'+encodeURIComponent(b.id),1);
-      const m=d.pricing?.cardmarket;
-      if(m&&d.set?.cardCount?.official==c.set.printedTotal){
-        c.cardmarket={url:'',updatedAt:(m.updated||'').slice(0,10),prices:{trendPrice:m.trend,lowPrice:m.low,avg30:m.avg30,averageSellPrice:m.avg,reverseHoloTrend:m['trend-holo'],reverseHoloLow:m['low-holo'],reverseHoloAvg30:m['avg30-holo'],reverseHoloSell:m['avg-holo']}};
-        return true;
-      }
+    let list=[];
+    for(const lid of [String(c.number).padStart(3,'0'),String(c.number)]){ // TCGdex écrit parfois 095, parfois 95
+      try{list=await api('https://api.tcgdex.net/v2/en/cards?name='+encodeURIComponent(c.name)+'&localId=eq:'+encodeURIComponent(lid),1,true)}catch(e){}
+      if(list.length)break;
+    }
+    const det=[];
+    for(const b of list.slice(0,8)){try{const d=await api('https://api.tcgdex.net/v2/en/cards/'+encodeURIComponent(b.id),1,true);if(d.pricing?.cardmarket)det.push(d)}catch(e){}}
+    const same=n=>String(n||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    // on préfère la même extension (par son nom), sinon le même total imprimé
+    const d=det.find(x=>same(x.set?.name)===same(c.set.name))||det.find(x=>x.set?.cardCount?.official==c.set.printedTotal);
+    const m=d?.pricing?.cardmarket;
+    if(m){
+      c.cardmarket={url:'',updatedAt:(m.updated||'').slice(0,10),prices:{trendPrice:m.trend,lowPrice:m.low,avg30:m.avg30,averageSellPrice:m.avg,reverseHoloTrend:m['trend-holo'],reverseHoloLow:m['low-holo'],reverseHoloAvg30:m['avg30-holo'],reverseHoloSell:m['avg-holo']}};
+      return true;
     }
   }catch(e){}
   return false;
@@ -349,6 +382,13 @@ async function show(c,all){
     status('');
   }
 }
+const usd=n=>n==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(n);
+function tpHtml(c){
+  const pr=c.tcgplayer?.prices||{},k=['holofoil','reverseHolofoil','normal','1stEditionHolofoil','unlimitedHolofoil'].find(x=>pr[x]?.market)||Object.keys(pr)[0],x=pr[k];
+  const link=`<a href="${esc(csearch(c))}" target="_blank" rel="noopener">Chercher sur Cardmarket</a>`;
+  if(!x)return `<p class="meta">Aucun prix trouvé (extension très récente ?). ${link}</p>`;
+  return `<div class="big">${usd(x.market??x.mid)}</div><div class="sub"><span>Dès ${usd(x.low)}</span><span>${esc(k)}</span></div><p class="meta">Pas de prix Cardmarket pour cette carte : prix TCGplayer en dollars (marché américain). ${link}</p>`;
+}
 function render(all=window._all){
   window._all=all;const c=cur,p=c.cardmarket?.prices,foil=intrinsicFoil(c),hasRev=!foil&&p?.reverseHoloTrend>0;
   const v=finish==='reverse'?{t:p.reverseHoloTrend,l:p.reverseHoloLow,a:p.reverseHoloAvg30,s:p.reverseHoloSell}:p&&{t:p.trendPrice,l:p.lowPrice,a:p.avg30,s:p.averageSellPrice};
@@ -359,11 +399,11 @@ function render(all=window._all){
   <div class="meta">N° ${esc(c.number)}/${esc(c.set.printedTotal)} · ${esc(c.rarity||'Rareté inconnue')}</div>
   <span class="badge">Langue : ${lang?LANGS[lang]:'non détectée'}</span>
   <span class="badge ${isFoil?'foil':''}">${foil?'Foil (holo de base)':finish==='reverse'?'Foil (reverse holo)':'Non foil'}</span>
-  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${(window._read.matched==='total'||window._read.matched==='number')?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
+  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${window._read.matched==='codename'?` · extension retrouvée d’après le code : <b>${esc(window._read.via)}</b>`:''}${(window._read.matched==='total'||window._read.matched==='number')?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
   ${hasRev?`<div class="chips" role="group" aria-label="Finition"><button aria-pressed="${finish==='normal'}" data-f="normal">Normale</button><button aria-pressed="${finish==='reverse'}" data-f="reverse">Reverse holo</button></div>`:''}
   </div>
   <div class="price">${v?`<div class="big">${eur(v.t)}</div><div class="sub"><span>Dès ${eur(v.l)}</span><span>Moy. 30 j ${eur(v.a)}</span><span>Moy. vente ${eur(v.s)}</span></div>
-  <p class="meta">Tendance Cardmarket · maj ${esc(c.cardmarket.updatedAt)} · <a href="${esc(c.cardmarket.url||csearch(c))}" target="_blank" rel="noopener">Voir sur Cardmarket</a></p>`:`<p class="meta">Aucun prix trouvé (extension très récente ?). <a href="${esc(csearch(c))}" target="_blank" rel="noopener">Chercher sur Cardmarket</a></p>`}</div></div>
+  <p class="meta">Tendance Cardmarket · maj ${esc(c.cardmarket.updatedAt)} · <a href="${esc(c.cardmarket.url||csearch(c))}" target="_blank" rel="noopener">Voir sur Cardmarket</a></p>`:tpHtml(c)}</div></div>
   ${all&&all.length>1?`<div class="alt"><small>Autres correspondances, touche celle qui ressemble à ta carte :</small><br>${all.map((x,i)=>x===c?'':`<button data-i="${i}"><img src="${esc(x.images.small)}" alt="">${esc(x.name)} · ${esc(x.set.name)}</button>`).join('')}</div>`:''}`;
 }
 $('#out').onclick=e=>{const b=e.target.closest('button');if(!b)return;
