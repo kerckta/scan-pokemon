@@ -97,7 +97,7 @@ async function scan(canvas){
     const info=parse(low+'\n'+full);
     if(!info.number&&!info.name){status('Numéro illisible. Rapproche la carte ou saisis-le ci-dessous.');return}
     lang=info.lang;await search(info);
-  }catch(e){status('Erreur de lecture : '+e.message)}
+  }catch(e){status('Erreur : '+e.message)}
 }
 function parse(t){
   const m=t.match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/);
@@ -108,14 +108,25 @@ function parse(t){
 }
 
 // Recherche pokemontcg.io
+async function api(url){
+  for(let i=0;i<3;i++){
+    try{
+      const c=new AbortController(),t=setTimeout(()=>c.abort(),20000);
+      const r=await fetch(url,{signal:c.signal});clearTimeout(t);
+      if(r.ok){const j=await r.json().catch(()=>null);if(j)return j}
+    }catch(e){}
+    status('Le serveur de prix est lent, nouvel essai ('+(i+1)+'/3)…');
+    await new Promise(r=>setTimeout(r,1500));
+  }
+  throw new Error('le serveur de prix (pokemontcg.io) ne répond pas, réessaie dans un moment.');
+}
 async function search({number,total,code,name}){
   status('Recherche du prix…');
   const q=[];
   if(number)q.push(`number:"${number}"`);
   if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
   if(name)q.push(`name:"${name}*"`);
-  const r=await fetch('https://api.pokemontcg.io/v2/cards?pageSize=12&q='+encodeURIComponent(q.join(' ')));
-  const d=(await r.json()).data||[];
+  const d=(await api('https://api.pokemontcg.io/v2/cards?pageSize=12&select=id,name,number,rarity,set,images,cardmarket&q='+encodeURIComponent(q.join(' ')))).data||[];
   if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return}
   if(code)d.sort((a,b)=>(b.set.ptcgoCode===code)-(a.set.ptcgoCode===code));
   status('');show(d[0],d);
