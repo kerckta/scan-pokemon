@@ -87,12 +87,37 @@ function initTorch(){
   b.onclick=async()=>{
     const on=b.getAttribute('aria-pressed')!=='true';
     try{
+      if(on&&!(track.getCapabilities?.()||{}).torch){
+        status('Recherche de la caméra qui a le flash…');
+        if(!(await findTorchCamera()))throw new Error('torch');
+        status('');
+      }
       await track.applyConstraints({advanced:[{torch:on}]});
       const st=(track.getSettings?.()||{}).torch,caps=track.getCapabilities?.()||{};
       if((st!==undefined&&st!==on)||(!caps.torch&&st===undefined))throw new Error('torch');
       b.setAttribute('aria-pressed',on);b.textContent=on?'Lampe allumée':'Lampe';
-    }catch(e){status('Ce téléphone ou ce navigateur ne permet pas d’allumer la lampe depuis une page web. Essaie avec Chrome (pas le navigateur intégré d’une autre appli) ou éclaire la carte avec une lampe externe.')}
+    }catch(e){status('Aucune caméra de ce téléphone n’expose la lampe au navigateur (c’est le cas de certains modèles ou navigateurs). Éclaire la carte avec une lampe externe.')}
   };
+}
+// Beaucoup de téléphones ont plusieurs objectifs "arrière" et seul le principal a le flash :
+// on teste chaque caméra arrière jusqu'à en trouver une qui expose la lampe.
+async function findTorchCamera(){
+  const md=navigator.mediaDevices;
+  const devs=(await md.enumerateDevices()).filter(d=>d.kind==='videoinput'&&d.deviceId);
+  const back=devs.filter(d=>/back|rear|arri|environment/i.test(d.label));
+  const old=$('#v').srcObject;old?.getTracks().forEach(x=>x.stop());
+  for(const d of(back.length?back:devs)){
+    let s;
+    try{s=await md.getUserMedia({video:{deviceId:{exact:d.deviceId},width:{ideal:1920}}})}catch(e){continue}
+    const t=s.getVideoTracks()[0];
+    if((t.getCapabilities?.()||{}).torch){track=t;$('#v').srcObject=s;$('#v').play();return true}
+    s.getTracks().forEach(x=>x.stop());
+  }
+  try{ // aucune caméra avec lampe : on remet la caméra d'origine
+    const s=await md.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}});
+    track=s.getVideoTracks()[0];$('#v').srcObject=s;$('#v').play();
+  }catch(e){}
+  return false;
 }
 // Caméra
 navigator.mediaDevices?.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}}).then(s=>{track=s.getVideoTracks()[0];$('#v').addEventListener('playing',initTorch,{once:true});initTorch();$('#v').srcObject=s;$('#v').play()}).catch(()=>status('Caméra indisponible : utilise « Importer une photo ».'));
