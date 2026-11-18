@@ -66,7 +66,7 @@ small{color:var(--mut)}
   <button>Chercher</button>
 </form>
 <div id="out"></div>
-<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 00h15</small></p>
+<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 00h30</small></p>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
@@ -108,19 +108,19 @@ async function findTorchCamera(){
   const old=$('#v').srcObject;old?.getTracks().forEach(x=>x.stop());
   for(const d of(back.length?back:devs)){
     let s;
-    try{s=await md.getUserMedia({video:{deviceId:{exact:d.deviceId},width:{ideal:1920}}})}catch(e){continue}
+    try{s=await md.getUserMedia({video:{deviceId:{exact:d.deviceId},width:{ideal:3840},height:{ideal:2160}}})}catch(e){continue}
     const t=s.getVideoTracks()[0];
     if((t.getCapabilities?.()||{}).torch){track=t;$('#v').srcObject=s;$('#v').play();return true}
     s.getTracks().forEach(x=>x.stop());
   }
   try{ // aucune caméra avec lampe : on remet la caméra d'origine
-    const s=await md.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}});
+    const s=await md.getUserMedia({video:{facingMode:'environment',width:{ideal:3840},height:{ideal:2160}}});
     track=s.getVideoTracks()[0];$('#v').srcObject=s;$('#v').play();
   }catch(e){}
   return false;
 }
 // Caméra
-navigator.mediaDevices?.getUserMedia({video:{facingMode:'environment',width:{ideal:1920}}}).then(s=>{track=s.getVideoTracks()[0];$('#v').addEventListener('playing',initTorch,{once:true});initTorch();$('#v').srcObject=s;$('#v').play()}).catch(()=>status('Caméra indisponible : utilise « Importer une photo ».'));
+navigator.mediaDevices?.getUserMedia({video:{facingMode:'environment',width:{ideal:3840},height:{ideal:2160}}}).then(s=>{track=s.getVideoTracks()[0];track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});$('#v').addEventListener('playing',initTorch,{once:true});initTorch();$('#v').srcObject=s;$('#v').play()}).catch(()=>status('Caméra indisponible : utilise « Importer une photo ».'));
 
 function cropRect(){
   const v=$('#v'),vw=v.videoWidth,vh=v.videoHeight;if(!vw)return null;
@@ -180,12 +180,13 @@ $('#f').onchange=e=>{const file=e.target.files[0];if(!file)return;const img=new 
 let scanId=0,shownScan=0,poolP=null,langP=null;
 const NUM='0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ ';
 const F={a:'grayscale(1) contrast(1.6)',b:'grayscale(1) brightness(.75) contrast(2.3)',i:'grayscale(1) invert(1) contrast(1.8)'};
-// [x début, x fin, y début, échelle, filtre] : coins du bas (le numéro est en bas à gauche ou à droite), puis anti-reflet, puis bande complète
+// Lecture limitée au BAS GAUCHE de la carte, où sont imprimés « CODE LANGUE NUMÉRO » (ex. CRI FR 095/086).
+// [x début, x fin, y début, échelle, filtre, y fin] : deux fenêtres décalées (la carte bouge dans la sleeve), puis anti-reflet / inversé
 const ROUNDS=[
-  [[0,.55,.86,2,'a'],[.45,1,.86,2,'a']],
-  [[0,.55,.84,2.5,'i'],[.45,1,.84,2.5,'i']],
-  [[0,.55,.84,2.5,'b'],[.45,1,.84,2.5,'b']],
-  [[0,1,.8,3,'a'],[0,1,.8,3,'i']]
+  [[0.02,.45,.885,3.5,'a',.94],[0.02,.45,.90,3.5,'a',.955]],
+  [[0.02,.45,.885,3.5,'b',.94],[0.02,.45,.90,3.5,'i',.955]],
+  [[0.02,.45,.87,3.5,'a',.97],[0.02,.45,.87,3.5,'b',.97]],
+  [[0.02,.45,.87,3.5,'i',.97],[0.02,.5,.85,3,'a',.98]]
 ];
 async function mk(langs,params){const w=await Tesseract.createWorker(langs,1);await w.setParameters(params);return w}
 function getPool(){
@@ -200,8 +201,9 @@ function getPool(){
   return poolP;
 }
 getPool().catch(()=>{}); // préchargement dès l'ouverture de la page
-function crop(c,x0,x1,y0,scale,filter){
-  const x=Math.round(c.width*x0),w=Math.round(c.width*(x1-x0)),y=Math.round(c.height*y0),h=c.height-y;
+function crop(c,x0,x1,y0,scale,filter,y1=1){
+  const x=Math.round(c.width*x0),w=Math.round(c.width*(x1-x0)),y=Math.round(c.height*y0),h=Math.round(c.height*y1)-y;
+  scale=Math.min(scale,1300/w);
   const s=document.createElement('canvas');s.width=Math.round(w*scale);s.height=Math.round(h*scale);
   const g=s.getContext('2d');g.filter=filter;g.drawImage(c,x,y,w,h,0,0,s.width,s.height);return s;
 }
@@ -212,7 +214,7 @@ async function scan(canvas){
     const sch=await getPool();
     const codes=[];
     for(let r=0;r<ROUNDS.length;r++){const round=ROUNDS[r];
-      const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f]))))).map(x=>x.data.text);
+      const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f,y1])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f],y1))))).map(x=>x.data.text);
       all+=' '+txt.join(' ').replace(/\s+/g,' ');
       const ps=txt.map(parse),best=ps.find(p=>p.number&&p.total)||ps.find(p=>p.number);
       if(best&&(!info.number||(best.total&&!info.total)))info=best;
@@ -220,7 +222,7 @@ async function scan(canvas){
       if(info.number&&info.total&&(codes.length||r>=1))break;
     }
     const pc=parse(all);info.lang??=pc.lang;
-    if(!info.number){status('Numéro illisible. Rapproche la carte, incline-la pour éviter les reflets, ou saisis le numéro ci-dessous. (texte lu : « '+all.trim().slice(0,90)+' »)');return}
+    if(!info.number){status('Numéro illisible : le bas gauche de la carte (code, langue, numéro) doit être net et sans reflet. Rapproche la carte, incline-la un peu, ou saisis le numéro ci-dessous. (texte lu : « '+all.trim().slice(0,90)+' »)');return}
     lang=info.lang||null;
     status('Lu : n° '+info.number+'/'+(info.total||'?')+(codes[0]?' · extension '+codes[0]:'')+' — recherche du prix…');
     ok=await search({...info,codes,canvas});if(ok)shownScan=id;
@@ -244,7 +246,7 @@ function parse(t){
   let m=T.match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/),number=null,total=null,at=-1;
   if(m){number=m[1];total=m[2];at=m.index}
   else{ // 2) barre mal lue (souvent 7, 1, I ou |) ou absente : 0957086 -> 095/086
-    const k=T.match(/(0\d{2})[\/71I|L ]?(0\d{2})/)||T.match(/(?<!\d)(\d{3})[\/71I|L ]?(\d{3})\d{0,2}(?!\d)/); // d'abord le format SV (095/086), sinon 3+3 chiffres
+    const k=T.match(/(0\d{2})[\/71I|L ]{0,2}(0\d{2})/)||T.match(/(?<!\d)(\d{3})[\/71I|L ]?(\d{3})\d{0,2}(?!\d)/); // d'abord le format SV (095/086), sinon 3+3 chiffres
     if(k&&+k[2]>=10){number=k[1];total=k[2];at=k.index}
   }
   // langue + code d'extension : « CRI FR 095/086 », cadre et espaces tolérés
@@ -313,6 +315,7 @@ async function search({number,total,code,codes:cands,name,setId,setName,canvas})
   if(!d.length&&!setId&&!setName){ // code absent ou inconnu de la base de prix : numéro + total imprimé
     const q=[...base];if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
     d=await get(q);matched='total';
+    if(!d.length&&number){d=await get(base);matched='number'} // total mal lu : on propose toutes les cartes de ce numéro
   }
   if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return false}
   window._read=canvas?{code:matched==='code'?used:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched}:null; // ce qui a été lu sur la carte
@@ -356,7 +359,7 @@ function render(all=window._all){
   <div class="meta">N° ${esc(c.number)}/${esc(c.set.printedTotal)} · ${esc(c.rarity||'Rareté inconnue')}</div>
   <span class="badge">Langue : ${lang?LANGS[lang]:'non détectée'}</span>
   <span class="badge ${isFoil?'foil':''}">${foil?'Foil (holo de base)':finish==='reverse'?'Foil (reverse holo)':'Non foil'}</span>
-  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${window._read.matched==='total'?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
+  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${(window._read.matched==='total'||window._read.matched==='number')?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
   ${hasRev?`<div class="chips" role="group" aria-label="Finition"><button aria-pressed="${finish==='normal'}" data-f="normal">Normale</button><button aria-pressed="${finish==='reverse'}" data-f="reverse">Reverse holo</button></div>`:''}
   </div>
   <div class="price">${v?`<div class="big">${eur(v.t)}</div><div class="sub"><span>Dès ${eur(v.l)}</span><span>Moy. 30 j ${eur(v.a)}</span><span>Moy. vente ${eur(v.s)}</span></div>
