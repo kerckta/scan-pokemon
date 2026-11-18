@@ -66,7 +66,7 @@ small{color:var(--mut)}
   <button>Chercher</button>
 </form>
 <div id="out"></div>
-<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 00h50</small></p>
+<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 02h10</small></p>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
@@ -170,9 +170,9 @@ setInterval(async()=>{
     return;
   }
   still=looks&&calm?still+1:0;
-  if(still>=T.frames){armed=false;still=0;ref=m.g;status('Carte détectée, lecture…');const c=frameCanvas();if(c)await scan(c)}
+  if(still>=T.frames){armed=false;still=0;ref=m.g;status('Carte détectée, lecture…');const c=frameCanvas();if(c)await scan(c,frameCanvas)}
 },250);
-$('#go').onclick=()=>{const c=frameCanvas();c?scan(c):status('La caméra n’est pas prête.')};
+$('#go').onclick=()=>{const c=frameCanvas();c?scan(c,frameCanvas):status('La caméra n’est pas prête.')};
 $('#f').onchange=e=>{const file=e.target.files[0];if(!file)return;const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=img.width;c.height=img.height;c.getContext('2d').drawImage(img,0,0);scan(c)};img.src=URL.createObjectURL(file)};
 
 // OCR rapide : 2 lecteurs "eng" (chiffres) en parallèle, préchargés au démarrage.
@@ -207,25 +207,41 @@ function crop(c,x0,x1,y0,scale,filter,y1=1){
   const s=document.createElement('canvas');s.width=Math.round(w*scale);s.height=Math.round(h*scale);
   const g=s.getContext('2d');g.filter=filter;g.drawImage(c,x,y,w,h,0,0,s.width,s.height);return s;
 }
-async function scan(canvas){
-  if(busy)return;busy=true;let ok=false;const id=++scanId;let info={},all='';
+// Vote : chaque lecture compte 2 points si la barre « / » est bien lue, 1 sinon. Le numéro est accepté à 3 points (2 lectures d'accord).
+const wOf=p=>p.strict?2:1;
+function tally(reads){
+  const top=o=>Object.keys(o).sort((a,b)=>o[b]-o[a]),nw={};
+  for(const p of reads)nw[p.number]=(nw[p.number]||0)+wOf(p);
+  const number=top(nw)[0];
+  if(!number)return{number:null,numW:0,total:null,codes:[],lang:null};
+  const tw={},cw={},lw={};
+  for(const p of reads)if(p.number===number){
+    const w=wOf(p);if(p.total)tw[p.total]=(tw[p.total]||0)+w;
+    for(const c of p.codes)cw[c]=(cw[c]||0)+w;if(p.lang)lw[p.lang]=(lw[p.lang]||0)+w;
+  }
+  return{number,numW:nw[number],total:top(tw)[0]||null,codes:top(cw).slice(0,3),lang:top(lw)[0]||null};
+}
+async function scan(canvas,grab){
+  if(busy)return;busy=true;let ok=false;const id=++scanId;let info={number:null,total:null},all='';
   try{
     status('Lecture du numéro…');
-    const sch=await getPool();
-    const codes=[];
-    for(let r=0;r<ROUNDS.length;r++){const round=ROUNDS[r];
-      const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f,y1])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f],y1))))).map(x=>x.data.text);
-      all+=' '+txt.join(' ').replace(/\s+/g,' ');
-      const ps=txt.map(parse),best=ps.find(p=>p.number&&p.total)||ps.find(p=>p.number);
-      if(best&&(!info.number||(best.total&&!info.total)))info=best;
-      for(const p of ps)if(p.number)for(const c of p.codes)if(!codes.includes(c))codes.push(c);
-      if(info.number&&info.total&&(codes.length||r>=1))break;
+    const sch=await getPool(),reads=[];let rr=0,t=tally(reads);
+    outer:for(let f=0;f<3;f++){
+      let cv=canvas;
+      if(f>0){await new Promise(r=>setTimeout(r,200));cv=grab&&grab();if(!cv)break} // nouvelle image de la caméra : d'autres erreurs de lecture
+      for(const round of(f===0?ROUNDS:ROUNDS.slice(0,2))){
+        const txt=(await Promise.all(round.map(([x0,x1,y0,sc,fl,y1])=>sch.addJob('recognize',crop(cv,x0,x1,y0,sc,F[fl],y1))))).map(x=>x.data.text);
+        all+=' '+txt.join(' ').replace(/\s+/g,' ');
+        for(const q of txt.map(parse))if(q.number)reads.push(q);
+        t=tally(reads);rr++;
+        if(t.numW>=3&&(t.codes.length||rr>=2))break outer; // lectures concordantes
+      }
     }
-    const pc=parse(all);info.lang??=pc.lang;
+    info=t;const pc=parse(all);info.lang??=pc.lang;
     if(!info.number){status('Numéro illisible : le bas gauche de la carte (code, langue, numéro) doit être net et sans reflet. Rapproche la carte, incline-la un peu, ou saisis le numéro ci-dessous. (texte lu : « '+all.trim().slice(0,90)+' »)');return}
     lang=info.lang||null;
-    status('Lu : n° '+info.number+'/'+(info.total||'?')+(codes[0]?' · extension '+codes[0]:'')+' — recherche du prix…');
-    ok=await search({...info,codes,canvas});if(ok)shownScan=id;
+    status('Lu : n° '+info.number+'/'+(info.total||'?')+(info.codes[0]?' · extension '+info.codes[0]:'')+' — recherche du prix…');
+    ok=await search({...info,canvas});if(ok)shownScan=id;
     if(ok&&!lang)detectLang(canvas,id); // en arrière-plan : ne retarde pas le prix
   }catch(e){status('Lu : n° '+(info.number||'?')+'/'+(info.total||'?')+' — '+e.message)}
   finally{busy=false;if(ok){fails=0;failAt=0}else{fails++;failAt=Date.now()}}
@@ -261,7 +277,7 @@ function parse(t){
     const before=T.slice(Math.max(0,at-26),at).match(/\b[A-Z0-9]{3}\b/g)||[];
     for(const w of before.reverse())if(/[A-Z]/.test(w)&&!/^(EN|FR|DE|ES|IT|PT)$/.test(w)&&!codes.includes(w))codes.push(w);
   }
-  return{number:number&&number.replace(/^([A-Z]*)0+(?=\d)/,'$1'),total:total&&total.replace(/^0+(?=\d)/,''),code:codes[0]||null,codes:codes.slice(0,3),lang:l};
+  return{number:number&&number.replace(/^([A-Z]*)0+(?=\d)/,'$1'),total:total&&total.replace(/^0+(?=\d)/,''),code:codes[0]||null,codes:codes.slice(0,3),lang:l,strict:!!m};
 }
 
 // Recherche pokemontcg.io
@@ -317,7 +333,7 @@ function findSet(txt){
   const s=SETS.find(x=>[x.name,x.ptcgoCode,x.id].some(k=>k&&k.toLowerCase()===v));
   return s?{setId:s.id}:{setName:txt.trim()};
 }
-async function search({number,total,code,codes:cands,name,setId,setName,canvas}){
+async function search({number,total,code,codes:cands,name,setId,setName,canvas,numW}){
   if(!number&&!name){status('Saisis au moins un nom ou un numéro (avec l’extension si tu veux).');return false}
   status('Recherche du prix…');
   const base=[];
@@ -345,7 +361,7 @@ async function search({number,total,code,codes:cands,name,setId,setName,canvas})
     if(!d.length&&number){d=await get(base);matched='number'} // total mal lu : on propose toutes les cartes de ce numéro
   }
   if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return false}
-  window._read=canvas?{code:matched==='code'?used:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched,via:matched==='codename'?used:null}:null; // ce qui a été lu sur la carte
+  window._read=canvas?{code:matched==='code'?used:(cands&&cands[0])||code,raw:`${number}/${total||'?'}`,matched,via:matched==='codename'?used:null,weak:numW!=null&&numW<3}:null; // ce qui a été lu sur la carte
   status('');show(d[0],d);return true;
 }
 $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{0,3}\d{1,3})\s*\/?\s*(\d{1,3})?/);
@@ -354,31 +370,40 @@ $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{
 // Affichage
 const intrinsicFoil=c=>!['Common','Uncommon','Rare','Promo',undefined].includes(c.rarity);
 const csearch=c=>'https://www.cardmarket.com/fr/Pokemon/Products/Search?searchString='+encodeURIComponent(c.name+' '+c.number);
+const cmOk=c=>{const p=c.cardmarket?.prices;return !!p&&[p.trendPrice,p.avg30,p.lowPrice,p.averageSellPrice].some(x=>x>0)};
 async function enrich(c){
   try{
-    let list=[];
-    for(const lid of [String(c.number).padStart(3,'0'),String(c.number)]){ // TCGdex écrit parfois 095, parfois 95
-      try{list=await api('https://api.tcgdex.net/v2/en/cards?name='+encodeURIComponent(c.name)+'&localId=eq:'+encodeURIComponent(lid),1,true)}catch(e){}
-      if(list.length)break;
-    }
-    const det=[];
-    for(const b of list.slice(0,8)){try{const d=await api('https://api.tcgdex.net/v2/en/cards/'+encodeURIComponent(b.id),1,true);if(d.pricing?.cardmarket)det.push(d)}catch(e){}}
-    const same=n=>String(n||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-    // on préfère la même extension (par son nom), sinon le même total imprimé
+    const n=parseInt(c.number,10),enc=encodeURIComponent;
+    let brief=[];
+    try{brief=await api('https://api.tcgdex.net/v2/en/cards?name=eq:'+enc(c.name),2,true)}catch(e){}
+    if(!brief.length){try{brief=await api('https://api.tcgdex.net/v2/en/cards?name='+enc(c.name),2,true)}catch(e){}}
+    const cand=(brief||[]).filter(x=>parseInt(String(x.localId).replace(/\D/g,''),10)===n).slice(0,8);
+    const det=(await Promise.all(cand.map(x=>api('https://api.tcgdex.net/v2/en/cards/'+enc(x.id),2,true).catch(()=>null)))).filter(x=>x&&x.pricing);
+    const same=v=>String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
     const d=det.find(x=>same(x.set?.name)===same(c.set.name))||det.find(x=>x.set?.cardCount?.official==c.set.printedTotal);
-    const m=d?.pricing?.cardmarket;
-    if(m){
+    if(!d)return false;
+    let got=false;
+    const m=d.pricing.cardmarket;
+    if(m&&[m.trend,m.avg30,m.low,m.avg].some(x=>x>0)){
       c.cardmarket={url:'',updatedAt:(m.updated||'').slice(0,10),prices:{trendPrice:m.trend,lowPrice:m.low,avg30:m.avg30,averageSellPrice:m.avg,reverseHoloTrend:m['trend-holo'],reverseHoloLow:m['low-holo'],reverseHoloAvg30:m['avg30-holo'],reverseHoloSell:m['avg-holo']}};
-      return true;
+      got=true;
     }
+    const tp=d.pricing.tcgplayer;
+    if(tp&&!c.tcgplayer?.prices){
+      const prices={};
+      for(const [k,v] of Object.entries(tp))if(v&&typeof v==='object'&&(v.marketPrice||v.midPrice))prices[k.replace(/-(\w)/g,(_,x)=>x.toUpperCase())]={market:v.marketPrice,low:v.lowPrice,mid:v.midPrice};
+      if(Object.keys(prices).length){c.tcgplayer={prices};got=true}
+    }
+    return got;
   }catch(e){}
   return false;
 }
 async function show(c,all){
   cur=c;finish='normal';render(all);
-  if(!c.cardmarket?.prices){
+  if(!cmOk(c)){
     status('Prix absent, recherche dans une autre source…');
-    if(await enrich(c)){render(all)}
+    const got=await enrich(c);
+    if(got&&cur===c)render(all);
     status('');
   }
 }
@@ -386,11 +411,12 @@ const usd=n=>n==null?'—':new Intl.NumberFormat('en-US',{style:'currency',curre
 function tpHtml(c){
   const pr=c.tcgplayer?.prices||{},k=['holofoil','reverseHolofoil','normal','1stEditionHolofoil','unlimitedHolofoil'].find(x=>pr[x]?.market)||Object.keys(pr)[0],x=pr[k];
   const link=`<a href="${esc(csearch(c))}" target="_blank" rel="noopener">Chercher sur Cardmarket</a>`;
-  if(!x)return `<p class="meta">Aucun prix trouvé (extension très récente ?). ${link}</p>`;
-  return `<div class="big">${usd(x.market??x.mid)}</div><div class="sub"><span>Dès ${usd(x.low)}</span><span>${esc(k)}</span></div><p class="meta">Pas de prix Cardmarket pour cette carte : prix TCGplayer en dollars (marché américain). ${link}</p>`;
+  const retry=`<button id="retry" data-retry="1">Réessayer le prix</button>`;
+  if(!x)return `<p class="meta">Aucun prix trouvé pour l’instant (serveur lent ou extension très récente). ${retry} ${link}</p>`;
+  return `<div class="big">${usd(x.market??x.mid)}</div><div class="sub"><span>Dès ${usd(x.low)}</span><span>${esc(k)}</span></div><p class="meta">Pas de prix Cardmarket pour cette carte : prix TCGplayer en dollars (marché américain). ${retry} ${link}</p>`;
 }
 function render(all=window._all){
-  window._all=all;const c=cur,p=c.cardmarket?.prices,foil=intrinsicFoil(c),hasRev=!foil&&p?.reverseHoloTrend>0;
+  window._all=all;const c=cur,p=cmOk(cur)?cur.cardmarket.prices:null,foil=intrinsicFoil(c),hasRev=!foil&&p?.reverseHoloTrend>0;
   const v=finish==='reverse'?{t:p.reverseHoloTrend,l:p.reverseHoloLow,a:p.reverseHoloAvg30,s:p.reverseHoloSell}:p&&{t:p.trendPrice,l:p.lowPrice,a:p.avg30,s:p.averageSellPrice};
   const isFoil=foil||finish==='reverse';
   $('#out').innerHTML=`<div class="res"><img src="${esc(c.images.small)}" alt="${esc(c.name)}">
@@ -399,7 +425,7 @@ function render(all=window._all){
   <div class="meta">N° ${esc(c.number)}/${esc(c.set.printedTotal)} · ${esc(c.rarity||'Rareté inconnue')}</div>
   <span class="badge">Langue : ${lang?LANGS[lang]:'non détectée'}</span>
   <span class="badge ${isFoil?'foil':''}">${foil?'Foil (holo de base)':finish==='reverse'?'Foil (reverse holo)':'Non foil'}</span>
-  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${window._read.matched==='codename'?` · extension retrouvée d’après le code : <b>${esc(window._read.via)}</b>`:''}${(window._read.matched==='total'||window._read.matched==='number')?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
+  ${window._read?`<div class="meta">Lu sur la carte : extension <b>${esc(window._read.code||'non lue')}</b> · n° <b>${esc(window._read.raw)}</b>${window._read.weak?' · lecture peu sûre, vérifie le numéro sur ta carte':''}${window._read.matched==='codename'?` · extension retrouvée d’après le code : <b>${esc(window._read.via)}</b>`:''}${(window._read.matched==='total'||window._read.matched==='number')?(window._read.code?' · ce code est inconnu de la base de prix, extension déduite du total : vérifie-la':' · extension non lue, déduite du total : vérifie-la'):''}</div>`:''}
   ${hasRev?`<div class="chips" role="group" aria-label="Finition"><button aria-pressed="${finish==='normal'}" data-f="normal">Normale</button><button aria-pressed="${finish==='reverse'}" data-f="reverse">Reverse holo</button></div>`:''}
   </div>
   <div class="price">${v?`<div class="big">${eur(v.t)}</div><div class="sub"><span>Dès ${eur(v.l)}</span><span>Moy. 30 j ${eur(v.a)}</span><span>Moy. vente ${eur(v.s)}</span></div>
@@ -408,7 +434,11 @@ function render(all=window._all){
 }
 $('#out').onclick=e=>{const b=e.target.closest('button');if(!b)return;
   if(b.dataset.f){finish=b.dataset.f;render()}
-  else if(b.dataset.i){cur=window._all[b.dataset.i];finish='normal';render()}};
+  else if(b.dataset.i){show(window._all[b.dataset.i],window._all)}
+  else if(b.dataset.retry){const c=cur,all=window._all;b.disabled=true;b.textContent='Recherche…';
+    (async()=>{try{const u='https://api.pokemontcg.io/v2/cards/'+encodeURIComponent(c.id)+'?select=id,name,number,rarity,set,images,cardmarket,tcgplayer';
+      const j=await api(u,2,true).catch(()=>null);if(j?.data){c.cardmarket=j.data.cardmarket||c.cardmarket;c.tcgplayer=j.data.tcgplayer||c.tcgplayer}}catch(e){}
+      if(!cmOk(c))await enrich(c);if(cur===c)render(all)})()}};
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
 </script>
 </body>
