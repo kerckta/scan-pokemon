@@ -91,10 +91,10 @@ function frameCanvas(){
 
 // Détection automatique : carte présente (assez de contraste et de netteté) et immobile ~1 s
 const DEBUG=location.search.includes('debug');
-const T={mean:35,sd:28,lap:40,still:4,move:12,frames:3}; // seuils à ajuster avec ?debug
+const T={mean:35,sd:28,lap:40,still:4,move:8,change:7,frames:3}; // seuils à ajuster avec ?debug
 const sm=document.createElement('canvas');sm.width=96;sm.height=134;
 const sx=sm.getContext('2d',{willReadFrequently:true});
-let prev=null,still=0,armed=true,busy=false;
+let prev=null,ref=null,failAt=0,fails=0,still=0,armed=true,busy=false;
 function metrics(){
   const r=cropRect();if(!r)return null;
   sx.drawImage($('#v'),...r,0,0,96,134);
@@ -107,35 +107,88 @@ function metrics(){
   let diff=99;
   if(prev){diff=0;for(let i=0;i<g.length;i++)diff+=Math.abs(g[i]-prev[i]);diff/=g.length}
   prev=g;
-  return{mean,sd:Math.sqrt(vr/n),lap:lap/n,diff};
+  return{mean,sd:Math.sqrt(vr/n),lap:lap/n,diff,g};
 }
+const meanAbs=(a,b)=>{let s=0;for(let i=0;i<a.length;i++)s+=Math.abs(a[i]-b[i]);return s/a.length};
 setInterval(async()=>{
   if(!$('#auto').checked||busy)return;
   const m=metrics();if(!m)return;
   const looks=m.mean>T.mean&&m.sd>T.sd&&m.lap>T.lap,calm=m.diff<T.still;
   $('.frame').classList.toggle('ok',looks&&calm);
   if(DEBUG)$('#dbg').textContent=`lum ${m.mean|0} · contraste ${m.sd|0} · netteté ${m.lap|0} · mvt ${m.diff|0} · ${armed?'prêt':'attente'}`;
-  if(!armed){if(!looks||m.diff>T.move){armed=true;still=0}return}
+  if(!armed){
+    const dr=ref?meanAbs(m.g,ref):99;
+    // nouvelle carte : carte retirée, mouvement, ou image stable mais différente de celle scannée
+    if(!looks||m.diff>T.move||(dr>T.change&&calm)){armed=true;still=0;fails=0;failAt=0}
+    // échec de lecture : on retente au plus 2 fois si la carte reste en place
+    else if(failAt&&fails<2&&calm&&Date.now()-failAt>2500){armed=true;still=0}
+    return;
+  }
   still=looks&&calm?still+1:0;
-  if(still>=T.frames){armed=false;still=0;status('Carte détectée, lecture…');const c=frameCanvas();if(c)await scan(c)}
-},400);
+  if(still>=T.frames){armed=false;still=0;ref=m.g;status('Carte détectée, lecture…');const c=frameCanvas();if(c)await scan(c)}
+},250);
 $('#go').onclick=()=>{const c=frameCanvas();c?scan(c):status('La caméra n’est pas prête.')};
 $('#f').onchange=e=>{const file=e.target.files[0];if(!file)return;const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=img.width;c.height=img.height;c.getContext('2d').drawImage(img,0,0);scan(c)};img.src=URL.createObjectURL(file)};
 
-// OCR
+// OCR rapide : 2 lecteurs "eng" (chiffres) en parallèle, préchargés au démarrage.
+// Le lecteur multilingue (pour la langue) ne se charge qu'en arrière-plan, après l'affichage du prix.
+let scanId=0,poolP=null,langP=null;
+const NUM='0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ ';
+const F={a:'grayscale(1) contrast(1.6)',b:'grayscale(1) brightness(.75) contrast(2.3)',i:'grayscale(1) invert(1) contrast(1.8)'};
+// [x début, x fin, y début, échelle, filtre] : coins du bas (le numéro est en bas à gauche ou à droite), puis anti-reflet, puis bande complète
+const ROUNDS=[
+  [[0,.55,.86,2,'a'],[.45,1,.86,2,'a']],
+  [[0,.55,.84,2.5,'b'],[.45,1,.84,2.5,'b']],
+  [[0,1,.8,3,'a'],[0,1,.8,3,'i']]
+];
+async function mk(langs,params){const w=await Tesseract.createWorker(langs,1);await w.setParameters(params);return w}
+function getPool(){
+  if(!poolP){
+    poolP=(async()=>{
+      const s=Tesseract.createScheduler(),n=Math.min(2,navigator.hardwareConcurrency||2);
+      const ws=await Promise.all(Array.from({length:n},()=>mk('eng',{tessedit_char_whitelist:NUM,tessedit_pageseg_mode:'11'})));
+      ws.forEach(w=>s.addWorker(w));return s;
+    })();
+    poolP.catch(()=>{poolP=null});
+  }
+  return poolP;
+}
+getPool().catch(()=>{}); // préchargement dès l'ouverture de la page
+function crop(c,x0,x1,y0,scale,filter){
+  const x=Math.round(c.width*x0),w=Math.round(c.width*(x1-x0)),y=Math.round(c.height*y0),h=c.height-y;
+  const s=document.createElement('canvas');s.width=Math.round(w*scale);s.height=Math.round(h*scale);
+  const g=s.getContext('2d');g.filter=filter;g.drawImage(c,x,y,w,h,0,0,s.width,s.height);return s;
+}
 async function scan(canvas){
-  if(busy)return;busy=true;
+  if(busy)return;busy=true;let ok=false;const id=++scanId;
   try{
-    status('Chargement de la lecture de texte (la 1re fois, quelques Mo)…');
-    worker??=await Tesseract.createWorker('eng+fra+deu+spa+ita+por',1,{logger:m=>m.status==='recognizing text'&&status('Lecture… '+Math.round(m.progress*100)+' %')});
-    const full=(await worker.recognize(canvas)).data.text;
-    const sh=Math.round(canvas.height*.2),s=document.createElement('canvas');s.width=canvas.width*2;s.height=sh*2;
-    s.getContext('2d').drawImage(canvas,0,canvas.height-sh,canvas.width,sh,0,0,s.width,s.height);
-    const low=(await worker.recognize(s)).data.text;
-    const info=parse(low+'\n'+full);
-    if(!info.number&&!info.name){status('Numéro illisible. Rapproche la carte ou saisis-le ci-dessous.');return}
-    lang=info.lang;await search(info);
-  }catch(e){status('Erreur : '+e.message)}finally{busy=false}
+    status('Lecture du numéro…');
+    const sch=await getPool();
+    let info={},all='';
+    for(const round of ROUNDS){
+      const txt=(await Promise.all(round.map(([x0,x1,y0,sc,f])=>sch.addJob('recognize',crop(canvas,x0,x1,y0,sc,F[f]))))).map(r=>r.data.text);
+      all+='\n'+txt.join('\n');
+      const ps=txt.map(parse),best=ps.find(p=>p.number&&p.total)||ps.find(p=>p.number);
+      if(best&&(!info.number||(best.total&&!info.total)))info=best;
+      if(info.number&&info.total)break;
+    }
+    const pc=parse(all);info.code??=pc.code;info.lang??=pc.lang;
+    if(!info.number){status('Numéro illisible. Rapproche la carte, incline-la pour éviter les reflets, ou saisis le numéro ci-dessous.');return}
+    lang=info.lang||null;
+    ok=await search(info);
+    if(ok&&!lang)detectLang(canvas,id); // en arrière-plan : ne retarde pas le prix
+  }catch(e){status('Erreur : '+e.message)}
+  finally{busy=false;if(ok){fails=0;failAt=0}else{fails++;failAt=Date.now()}}
+}
+async function detectLang(canvas,id){
+  try{
+    if(!langP){langP=mk('eng+fra+deu+spa+ita+por',{tessedit_pageseg_mode:'6'});langP.catch(()=>{langP=null})}
+    const w=await langP;
+    const t=(await w.recognize(crop(canvas,0,1,.55,1.5,'grayscale(1) contrast(1.4)'))).data.text;
+    if(id!==scanId)return;
+    const l=parse(t).lang;
+    if(l){lang=l;if(cur)render()}
+  }catch(e){}
 }
 function parse(t){
   const m=t.match(/\b([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})\b/);
@@ -158,19 +211,22 @@ async function api(url,n=3){
   }
   throw new Error('le serveur de prix (pokemontcg.io) ne répond pas, réessaie dans un moment.');
 }
+const apiCache=new Map();
 async function search({number,total,code,name}){
   status('Recherche du prix…');
   const q=[];
   if(number)q.push(`number:"${number}"`);
   if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
   if(name)q.push(`name:"${name}*"`);
-  const d=(await api('https://api.pokemontcg.io/v2/cards?pageSize=12&select=id,name,number,rarity,set,images,cardmarket&q='+encodeURIComponent(q.join(' ')))).data||[];
-  if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return}
+  const url='https://api.pokemontcg.io/v2/cards?pageSize=12&select=id,name,number,rarity,set,images,cardmarket&q='+encodeURIComponent(q.join(' '));
+  let j=apiCache.get(url);if(!j){j=await api(url);apiCache.set(url,j)} // une carte déjà vue s'affiche instantanément
+  const d=j.data||[];
+  if(!d.length){status('Aucune carte trouvée. Vérifie le numéro ou cherche par nom.');return false}
   if(code)d.sort((a,b)=>(b.set.ptcgoCode===code)-(a.set.ptcgoCode===code));
-  status('');show(d[0],d);
+  status('');show(d[0],d);return true;
 }
 $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{0,3}\d{1,3})\s*\/?\s*(\d{1,3})?/);
-  lang=null;search({name:$('#mn').value.trim(),number:u&&u[1].replace(/^([A-Za-z]*)0+(?=\d)/,'$1'),total:u&&u[2]})};
+  scanId++;lang=null;search({name:$('#mn').value.trim(),number:u&&u[1].replace(/^([A-Za-z]*)0+(?=\d)/,'$1'),total:u&&u[2]})};
 
 // Affichage
 const intrinsicFoil=c=>!['Common','Uncommon','Rare','Promo',undefined].includes(c.rarity);
