@@ -41,7 +41,7 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--acc);outline-of
 .sub{display:flex;gap:18px;color:var(--mut);font-size:.9rem;flex-wrap:wrap}
 .alt{margin-top:12px}.alt button{margin:0 6px 6px 0;font-size:.85rem;padding:6px 10px;display:inline-flex;align-items:center;gap:8px;text-align:left}.alt img{width:34px;border-radius:3px;flex:none}
 #tl[aria-pressed=true]{background:#f5c542;border-color:#f5c542;color:#1b2430;font-weight:600}
-.auto{display:block;margin:2px 0 6px}.frame.ok{border-color:#4ade80}
+.frame.strip{height:auto;width:86%;aspect-ratio:5/1}.modes{margin:0 0 8px}.auto{display:block;margin:2px 0 6px}.frame.ok{border-color:#4ade80}
 a{color:var(--acc)}
 small{color:var(--mut)}
 @media (prefers-reduced-motion:no-preference){.res{animation:in .25s ease-out}@keyframes in{from{opacity:0}to{opacity:1}}}
@@ -56,6 +56,7 @@ small{color:var(--mut)}
   <label class="btn">Importer une photo<input type="file" id="f" accept="image/*"></label>
   <button id="tl" type="button" aria-pressed="false" hidden>Lampe</button>
 </div>
+<div class="chips modes" role="group" aria-label="Mode de lecture"><button type="button" id="mz" aria-pressed="true">Zoom sur le texte (conseillé)</button><button type="button" id="mc" aria-pressed="false">Carte entière</button></div>
 <label class="auto"><input type="checkbox" id="auto" checked> Scan automatique</label><small id="dbg"></small>
 <div id="st" role="status">Cadre la carte dans le rectangle, bien éclairée, sans reflet.</div>
 <form class="manual" id="m">
@@ -66,7 +67,7 @@ small{color:var(--mut)}
   <button>Chercher</button>
 </form>
 <div id="out"></div>
-<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 02h40</small></p>
+<p><small>Prix : tendance Cardmarket (€) via pokemontcg.io, toutes langues confondues, mis à jour une fois par jour environ. · Version du 19/11, 03h15</small></p>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
@@ -122,10 +123,13 @@ async function findTorchCamera(){
 // Caméra
 navigator.mediaDevices?.getUserMedia({video:{facingMode:'environment',width:{ideal:3840},height:{ideal:2160}}}).then(s=>{track=s.getVideoTracks()[0];track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});$('#v').addEventListener('playing',initTorch,{once:true});initTorch();$('#v').srcObject=s;$('#v').play()}).catch(()=>status('Caméra indisponible : utilise « Importer une photo ».'));
 
+let zoom=true;try{zoom=localStorage.getItem('mode')!=='card'}catch(e){}
+let TD=null;try{if('TextDetector'in window)TD=new TextDetector()}catch(e){} // lecteur de texte du téléphone, quand le navigateur le propose
 function cropRect(){
   const v=$('#v'),vw=v.videoWidth,vh=v.videoHeight;if(!vw)return null;
   let w=vw,h=vh,x=0,y=0;
   if(vw/vh>.75){w=vh*.75;x=(vw-w)/2}else{h=vw/.75;y=(vh-h)/2}
+  if(zoom){const sw=w*.86,sh=sw/5;return[x+(w-sw)/2,y+(h-sh)/2,sw,sh]} // rectangle de lecture : seulement la ligne CODE LANGUE NUMÉRO
   const ch=h*.88,cw=ch*63/88;return[x+(w-cw)/2,y+(h-ch)/2,cw,ch];
 }
 function frameCanvas(){
@@ -158,7 +162,7 @@ const meanAbs=(a,b)=>{let s=0;for(let i=0;i<a.length;i++)s+=Math.abs(a[i]-b[i]);
 setInterval(async()=>{
   if(!$('#auto').checked||busy)return;
   const m=metrics();if(!m)return;
-  const looks=m.mean>T.mean&&m.sd>T.sd&&m.lap>T.lap,calm=m.diff<T.still;
+  const looks=m.mean>T.mean&&m.sd>T.sd&&m.lap>(zoom?25:T.lap),calm=m.diff<T.still;
   $('.frame').classList.toggle('ok',looks&&calm);
   if(DEBUG)$('#dbg').textContent=`lum ${m.mean|0} · contraste ${m.sd|0} · netteté ${m.lap|0} · mvt ${m.diff|0} · ${armed?'prêt':'attente'}`;
   if(!armed){
@@ -170,9 +174,9 @@ setInterval(async()=>{
     return;
   }
   still=looks&&calm?still+1:0;
-  if(still>=T.frames){armed=false;still=0;ref=m.g;status('Carte détectée, lecture…');const c=frameCanvas();if(c)await scan(c,frameCanvas)}
+  if(still>=T.frames){armed=false;still=0;ref=m.g;status('Carte détectée, lecture…');const c=frameCanvas();if(c)await scan(c,frameCanvas,zoom?STRIP_ROUNDS:ROUNDS)}
 },250);
-$('#go').onclick=()=>{const c=frameCanvas();c?scan(c,frameCanvas):status('La caméra n’est pas prête.')};
+$('#go').onclick=()=>{const c=frameCanvas();c?scan(c,frameCanvas,zoom?STRIP_ROUNDS:ROUNDS):status('La caméra n’est pas prête.')};
 $('#f').onchange=e=>{const file=e.target.files[0];if(!file)return;const img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=img.width;c.height=img.height;c.getContext('2d').drawImage(img,0,0);scan(c)};img.src=URL.createObjectURL(file)};
 
 // OCR rapide : 2 lecteurs "eng" (chiffres) en parallèle, préchargés au démarrage.
@@ -188,6 +192,8 @@ const ROUNDS=[
   [[0.02,.45,.87,3.5,'a',.97],[0.02,.45,.87,3.5,'b',.97]],
   [[0.02,.45,.87,3.5,'i',.97],[0.02,.5,.85,3,'a',.98]]
 ];
+// Mode zoom : l'image est déjà la ligne de texte ; trois lectures avec des filtres différents
+const STRIP_ROUNDS=[[[0,1,0,2,'a',1],[0,1,0,2,'b',1]],[[0,1,0,2,'i',1],[0,1,0,3,'a',1]]];
 async function mk(langs,params){const w=await Tesseract.createWorker(langs,1);await w.setParameters(params);return w}
 function getPool(){
   if(!poolP){
@@ -208,7 +214,7 @@ function crop(c,x0,x1,y0,scale,filter,y1=1){
   const g=s.getContext('2d');g.filter=filter;g.drawImage(c,x,y,w,h,0,0,s.width,s.height);return s;
 }
 // Vote : chaque lecture compte 2 points si la barre « / » est bien lue, 1 sinon. Le numéro est accepté à 3 points (2 lectures d'accord).
-const wOf=p=>p.strict?2:1;
+const wOf=p=>p.w||(p.strict?2:1);
 function tally(reads){
   const top=o=>Object.keys(o).sort((a,b)=>o[b]-o[a]),nw={};
   for(const p of reads)nw[p.number]=(nw[p.number]||0)+wOf(p);
@@ -221,7 +227,8 @@ function tally(reads){
   }
   return{number,numW:nw[number],total:top(tw)[0]||null,codes:top(cw).slice(0,3),lang:top(lw)[0]||null};
 }
-async function scan(canvas,grab){
+async function scan(canvas,grab,rounds){
+  const R=rounds||ROUNDS;
   if(busy)return;busy=true;let ok=false;const id=++scanId;let info={number:null,total:null},all='';
   try{
     status('Lecture du numéro…');
@@ -229,7 +236,11 @@ async function scan(canvas,grab){
     outer:for(let f=0;f<3;f++){
       let cv=canvas;
       if(f>0){await new Promise(r=>setTimeout(r,200));cv=grab&&grab();if(!cv)break} // nouvelle image de la caméra : d'autres erreurs de lecture
-      for(const round of(f===0?ROUNDS:ROUNDS.slice(0,2))){
+      if(TD){ // lecteur de texte du téléphone (bien plus fiable que Tesseract quand il existe)
+        try{const bl=await TD.detect(R===STRIP_ROUNDS?cv:crop(cv,.02,.5,.85,1,'none',1));const tx=bl.map(x=>x.rawValue).join(' ');all+=' '+tx;const q=parse(tx);if(q.number){q.w=3;reads.push(q)}}catch(e){TD=null}
+        t=tally(reads);if(t.numW>=3&&t.codes.length)break outer;
+      }
+      for(const round of(f===0?R:R.slice(0,2))){
         const txt=(await Promise.all(round.map(([x0,x1,y0,sc,fl,y1])=>sch.addJob('recognize',crop(cv,x0,x1,y0,sc,F[fl],y1))))).map(x=>x.data.text);
         all+=' '+txt.join(' ').replace(/\s+/g,' ');
         for(const q of txt.map(parse))if(q.number)reads.push(q);
@@ -238,11 +249,11 @@ async function scan(canvas,grab){
       }
     }
     info=t;const pc=parse(all);info.lang??=pc.lang;
-    if(!info.number){status('Numéro illisible : le bas gauche de la carte (code, langue, numéro) doit être net et sans reflet. Rapproche la carte, incline-la un peu, ou saisis le numéro ci-dessous. (texte lu : « '+all.trim().slice(0,90)+' »)');return}
+    if(!info.number){status('Numéro illisible : le bas gauche de la carte (code, langue, numéro) doit être net et sans reflet. Rapproche la caméra de la ligne, incline la carte un peu pour éviter le reflet, ou saisis le numéro ci-dessous. (texte lu : « '+all.trim().slice(0,90)+' »)');return}
     lang=info.lang||null;
     status('Lu : n° '+info.number+'/'+(info.total||'?')+(info.codes[0]?' · extension '+info.codes[0]:'')+' — recherche du prix…');
     ok=await search({...info,canvas});if(ok)shownScan=id;
-    if(ok&&!lang)detectLang(canvas,id); // en arrière-plan : ne retarde pas le prix
+    if(ok&&!lang&&R!==STRIP_ROUNDS)detectLang(canvas,id); // en arrière-plan : ne retarde pas le prix
   }catch(e){status('Lu : n° '+(info.number||'?')+'/'+(info.total||'?')+' — '+e.message)}
   finally{busy=false;if(ok){fails=0;failAt=0}else{fails++;failAt=Date.now()}}
 }
@@ -485,6 +496,13 @@ $('#out').onclick=e=>{const b=e.target.closest('button');if(!b)return;
     (async()=>{try{const u='https://api.pokemontcg.io/v2/cards/'+encodeURIComponent(c.id)+'?select=id,name,number,rarity,set,images,cardmarket,tcgplayer';
       const j=await api(u,2,true).catch(()=>null);if(j?.data){c.cardmarket=j.data.cardmarket||c.cardmarket;c.tcgplayer=j.data.tcgplayer||c.tcgplayer}}catch(e){}
       if(!cmOk(c))await enrich(c);if(cur===c)render(all)})()}};
+function setMode(z){
+  zoom=z;try{localStorage.setItem('mode',z?'zoom':'card')}catch(e){}
+  $('.frame').classList.toggle('strip',z);$('#mz').setAttribute('aria-pressed',z);$('#mc').setAttribute('aria-pressed',!z);
+  prev=null;armed=true;still=0;fails=0;failAt=0;
+  status(z?'Approche la caméra : mets seulement la ligne « CODE LANGUE NUMÉRO » (bas gauche de la carte, ex. CRI FR 095/086) dans le rectangle, bien nette.':'Cadre la carte entière dans le rectangle, bien éclairée, sans reflet.');
+}
+$('#mz').onclick=()=>setMode(true);$('#mc').onclick=()=>setMode(false);setMode(zoom);
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
 </script>
 </body>
