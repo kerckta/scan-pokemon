@@ -24,8 +24,9 @@ button.main{background:var(--acc);border-color:var(--acc);color:#fff;font-weight
 button:focus-visible,input:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 .btn input{display:none}
 #st{min-height:1.4em;color:var(--mut);font-size:.92rem}
-.manual{display:flex;gap:8px}
-.manual input{flex:1;min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--card)}
+.manual{display:flex;gap:8px;flex-wrap:wrap}
+.manual #ms{flex-basis:56%}
+.manual input{flex:1 1 38%;min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--card)}
 .res{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:14px;display:grid;grid-template-columns:110px 1fr;gap:14px}
 .res img{width:110px;border-radius:6px}
 .res h2{margin:0 0 4px;font-size:1.15rem}
@@ -60,6 +61,8 @@ small{color:var(--mut)}
 <form class="manual" id="m">
   <input id="mn" placeholder="Nom (anglais)" aria-label="Nom en anglais">
   <input id="mu" placeholder="N° (ex. 45/198)" aria-label="Numéro de carte" inputmode="text">
+  <input id="ms" list="sets" placeholder="Extension (ex. Paldea, MEG…)" aria-label="Extension" autocomplete="off">
+  <datalist id="sets"></datalist>
   <button>Chercher</button>
 </form>
 <div id="out"></div>
@@ -227,11 +230,30 @@ async function api(url,n=3){
   throw new Error('le serveur de prix (pokemontcg.io) ne répond pas, réessaie dans un moment.');
 }
 const apiCache=new Map();
-async function search({number,total,code,name}){
+// Liste des extensions (chargée quand on touche le champ « Extension »)
+let SETS=[];
+async function loadSets(){
+  if(SETS.length)return;
+  try{
+    const j=await api('https://api.pokemontcg.io/v2/sets?select=id,name,series,ptcgoCode,releaseDate&orderBy=-releaseDate',1);
+    SETS=j.data||[];
+    $('#sets').innerHTML=SETS.map(s=>`<option value="${esc(s.name)}">${esc(s.series)}${s.ptcgoCode?' · '+esc(s.ptcgoCode):''}</option>`).join('');
+    status('');
+  }catch(e){status('')}
+}
+$('#ms').addEventListener('focus',loadSets);
+function findSet(txt){
+  const v=txt.trim().toLowerCase();if(!v)return{};
+  const s=SETS.find(x=>[x.name,x.ptcgoCode,x.id].some(k=>k&&k.toLowerCase()===v));
+  return s?{setId:s.id}:{setName:txt.trim()};
+}
+async function search({number,total,code,name,setId,setName}){
+  if(!number&&!name){status('Saisis au moins un nom ou un numéro (avec l’extension si tu veux).');return false}
   status('Recherche du prix…');
   const q=[];
+  if(setId)q.push(`set.id:${setId}`);else if(setName)q.push(`set.name:"${setName.replace(/"/g,'')}*"`);
   if(number)q.push(`number:"${number}"`);
-  if(total&&/^\d+$/.test(total))q.push(`set.printedTotal:${total}`);
+  if(total&&/^\d+$/.test(total)&&!setId&&!setName)q.push(`set.printedTotal:${total}`);
   if(name)q.push(`name:"${name}*"`);
   const url='https://api.pokemontcg.io/v2/cards?pageSize=12&select=id,name,number,rarity,set,images,cardmarket&q='+encodeURIComponent(q.join(' '));
   let j=apiCache.get(url);if(!j){j=await api(url);apiCache.set(url,j)} // une carte déjà vue s'affiche instantanément
@@ -241,7 +263,7 @@ async function search({number,total,code,name}){
   status('');show(d[0],d);return true;
 }
 $('#m').onsubmit=e=>{e.preventDefault();const u=$('#mu').value.match(/([A-Za-z]{0,3}\d{1,3})\s*\/?\s*(\d{1,3})?/);
-  scanId++;lang=null;search({name:$('#mn').value.trim(),number:u&&u[1].replace(/^([A-Za-z]*)0+(?=\d)/,'$1'),total:u&&u[2]})};
+  scanId++;lang=null;search({...findSet($('#ms').value),name:$('#mn').value.trim(),number:u&&u[1].replace(/^([A-Za-z]*)0+(?=\d)/,'$1'),total:u&&u[2]})};
 
 // Affichage
 const intrinsicFoil=c=>!['Common','Uncommon','Rare','Promo',undefined].includes(c.rarity);
